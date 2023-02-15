@@ -408,6 +408,18 @@ func (s *Reconciler) setMachineCloudProviderSpecifics(vm *decode.VirtualMachine)
 	}
 }
 
+// Check whether the configuration of a machine is invalid
+func isInvalidMachineConfigurationError(err error) bool {
+	var machineError *machinecontroller.MachineError
+	if errors.As(err, &machineError) {
+		if machineError.Reason == machinev1.InvalidConfigurationMachineError {
+			klog.Infof("Actuator returned invalid configuration error: %v", machineError)
+			return true
+		}
+	}
+	return false
+}
+
 // Exists checks if machine exists
 func (s *Reconciler) Exists(ctx context.Context) (bool, error) {
 	vmSpec := &virtualmachines.Spec{
@@ -416,7 +428,7 @@ func (s *Reconciler) Exists(ctx context.Context) (bool, error) {
 	vmInterface, err := s.virtualMachinesSvc.Get(ctx, vmSpec)
 
 	if err != nil && azure.ResourceNotFound(err) {
-		return false, nil
+		return false, machinecontroller.InvalidMachineConfiguration(fmt.Sprintf("%s: Zone does not exist", vmSpec.Zone))
 	}
 
 	if err != nil {
@@ -461,6 +473,18 @@ func (s *Reconciler) Delete(ctx context.Context) error {
 		Name: s.scope.Machine.Name,
 	}
 
+	exists, err := s.Exists(ctx)
+	if s.scope.Machine.Spec.ProviderID != nil && isInvalidMachineConfigurationError(err) {
+		return fmt.Errorf("the machine %s has invalid configuration, but already exists, make the configuration of the machine valid for the deletion to be successful", s.scope.Machine.Name)
+	}
+	if err != nil && !isInvalidMachineConfigurationError(err) {
+		return err
+	}
+	if !exists {
+		klog.Infof("%s: Machine not found during delete, skipping", s.scope.Machine.Name)
+		return nil
+	}
+
 	// Getting a vm object does not work here so let's assume
 	// an instance is really being deleted
 	if s.scope.Machine.Annotations == nil {
@@ -470,7 +494,7 @@ func (s *Reconciler) Delete(ctx context.Context) error {
 	vmStateDeleting := machinev1.VMStateDeleting
 	s.scope.MachineStatus.VMState = &vmStateDeleting
 
-	err := s.virtualMachinesSvc.Delete(ctx, vmSpec)
+	err = s.virtualMachinesSvc.Delete(ctx, vmSpec)
 	if err != nil {
 		return fmt.Errorf("failed to delete machine: %w", err)
 	}

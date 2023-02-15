@@ -30,6 +30,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/pointer"
 	controllerclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -221,8 +222,23 @@ func (a *Actuator) Exists(ctx context.Context, machine *machinev1.Machine) (bool
 	}
 
 	isExists, err := a.reconcilerBuilder(scope).Exists(context.Background())
-	if err != nil {
-		klog.Errorf("failed to check machine %s exists: %v", machine.Name, err)
+	if !isInvalidMachineConfigurationError(err) {
+		return isExists, err
+	}
+
+	// If the machine has, e.g. invalid zone, and it doesn't have a phase set yet,
+	// we have to make sure the phase goes as "Failed".
+	if machine.Status.Phase == nil {
+		machine.Status.Phase = pointer.String("Failed")
+	}
+
+	// If the machine has, e.g. invalid zone, and we delete the invalid machinset,
+	// we want to set the machine to "Deleting" phase and return nil as error.
+	// We need the error to be nil so we can successfully delete the invalid machine.
+	// If the machine has a provider ID, then we believe something exists in the cloud.
+	// So we must not all the deletion if the provider ID is set.
+	if *machine.Status.Phase == "Deleting" && machine.Spec.ProviderID == nil {
+		return false, nil
 	}
 
 	return isExists, err
